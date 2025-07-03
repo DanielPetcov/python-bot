@@ -7,7 +7,7 @@ from models.models import BotInitializer
 
 from classes.bot import Bot
 
-load_dotenv()
+load_dotenv(dotenv_path='.env')
 
 async def main():
     bot_initializer = BotInitializer(
@@ -15,7 +15,8 @@ async def main():
         telegram_api_id=os.getenv('TELEGRAM_API_ID'),
         telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
         binance_api_key=os.getenv('BINANCE_API_KEY'),
-        binance_api_secret=os.getenv('BINANCE_API_SECRET')
+        binance_api_secret=os.getenv('BINANCE_API_SECRET'),
+        chat_id=os.getenv('CHAT_ID')
     )
     bot_itself = Bot(bot_initializer)
 
@@ -27,10 +28,11 @@ async def main():
         print('4. Modify a chat')
         print("5. Start the listener")
         print("6. Connect Binance")
-        print("7. Exit the app.")
+        print("7. Print current chat id")
+        print("8. Exit the app.")
         option = input("Enter: ")
 
-        match option:
+        match option:   
             case "1":
                 await bot_itself.start()
             case "2":
@@ -42,8 +44,10 @@ async def main():
             case "5":
                 await bot_itself.btcHandler()
             case "6":
-                await bot_itself.connectBinance()
+                await bot_itself.trade_on_binance()
             case "7":
+                await bot_itself.printCurrentChatId()
+            case "8":
                 await bot_itself.stop()
                 break
             case _:
