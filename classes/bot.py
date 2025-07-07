@@ -5,6 +5,7 @@ from models.models import BotInitializer
 from decimal import Decimal, ROUND_DOWN
 
 import requests
+import asyncio
 
 import nest_asyncio
 nest_asyncio.apply()
@@ -22,6 +23,7 @@ class Bot:
         self.client = TelegramClient('session', self.telegram_api_id, self.telegram_api_hash)
         self.listen_key = None
         self.active_orders = {}
+        self.trade_done_event = asyncio.Event()
 
     async def start(self):
         if(self.client.is_connected()):
@@ -58,26 +60,36 @@ class Bot:
         if not self.chat_id:
             print('You have no chat id present;')
             return
-        
-        if not self.client.is_connected():
-            await self.client.start()
-        
-        try:
+
+        while True:  # keep listening & restarting after trades finish
+            if not self.client.is_connected():
+                await self.client.start()
+
             entity = await self.client.get_entity(self.chat_id)
-        except ValueError as e:
-            print(f"Could not find chat '{self.chat_id}': {e}")
-            return
-        
-        @self.client.on(events.NewMessage(chats=entity))
-        async def handler(event):
-            message = event.raw_text
-            crypt_slugs = getBotTag(message)
 
-            if(crypt_slugs):
-                for tag in crypt_slugs:
-                    await self.trade_on_binance(tag)
+            @self.client.on(events.NewMessage(chats=entity))
+            async def handler(event):
+                message = event.raw_text
+                crypt_slugs = getBotTag(message)
+                if crypt_slugs:
+                    for tag in crypt_slugs:
+                        await self.trade_on_binance(tag)
 
-        await self.client.run_until_disconnected()
+            task = asyncio.create_task(self.client.run_until_disconnected())
+
+            print("Waiting for trade to complete...")
+            await self.trade_done_event.wait()  # Wait until trade signals done
+            self.trade_done_event.clear()
+
+            print("Trade completed, restarting listener...")
+
+            # Disconnect and cancel Telegram client before restarting
+            await self.client.disconnect()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # BINANCE STUFF ------------------------------------------------------------------------------------------
     
@@ -90,7 +102,6 @@ class Bot:
         invest_percent = 60
         leverage = 20
 
-        # -----------
         client = BinanceClient(self.binance_api_key, self.binance_api_secret)
         try:
             client.futures_change_leverage(symbol=my_symbol, leverage=leverage)
@@ -113,13 +124,13 @@ class Bot:
             if symbol['symbol'] == my_symbol:
                 quantityPrecision = symbol['quantityPrecision']
                 tick_precision = symbol['filters'][0]['tickSize']
-        
+
         print('quantity precision: ', quantityPrecision)
-        
+
         assets = client.futures_account_balance()
         balance = 0
         for asset in assets:
-            if(asset['asset'] == 'USDT'):
+            if asset['asset'] == 'USDT':
                 balance = asset['balance']
 
         if balance == 0:
@@ -131,7 +142,7 @@ class Bot:
         print('quantity before round: ', quantity)
         rounded_quantity = round(quantity, quantityPrecision)
 
-        print('ammount to invest: ',the_ammount_to_invest)
+        print('ammount to invest: ', the_ammount_to_invest)
         print('initial quantity: ', quantity)
         print('rounded quantity: ', rounded_quantity)
 
@@ -154,41 +165,55 @@ class Bot:
 
         try:
             order = client.futures_create_order(symbol=my_symbol, side='BUY', type='MARKET', quantity=str(rounded_quantity))
-            take_profit = client.futures_create_order(symbol=my_symbol, side="SELL", type="TAKE_PROFIT_MARKET", quantity=str(rounded_quantity), stopPrice=str(tp_price))
-            stop_loss = client.futures_create_order(symbol=my_symbol, side="SELL", type="STOP_MARKET", quantity=str(rounded_quantity), stopPrice=str(sl_price))
+            take_profit = client.futures_create_order(
+                symbol=my_symbol, side="SELL", type="TAKE_PROFIT_MARKET",
+                quantity=str(rounded_quantity), stopPrice=str(tp_price)
+            )
+            stop_loss = client.futures_create_order(
+                symbol=my_symbol, side="SELL", type="STOP_MARKET",
+                quantity=str(rounded_quantity), stopPrice=str(sl_price)
+            )
+
+            active_order_ids = {
+                "tp": take_profit['orderId'],
+                "sl": stop_loss['orderId']
+            }
+            print(active_order_ids)
+
+            twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret)
+            twm.start()
 
             def handle_socket_msg(msg):
                 print(msg)
                 if msg['e'] == 'ORDER_TRADE_UPDATE':
                     order = msg['o']
                     order_id = order['i']
-                    status = order['X']  # e.g., 'FILLED', 'CANCELED'
+                    status = order['X']  # 'FILLED', 'CANCELED', etc.
                     if order_id in active_order_ids.values() and status == 'FILLED':
                         print(f"Order filled: {order_id}")
-                        # Cancel the other one
+                        # Cancel the other order
                         for label, oid in active_order_ids.items():
                             if oid != order_id:
                                 try:
                                     client.futures_cancel_order(
-                                        symbol='BTCUSDT',
+                                        symbol=my_symbol,
                                         orderId=oid
                                     )
                                     print(f"Canceled {label.upper()} order {oid}")
                                 except Exception as e:
                                     print(f"Could not cancel {label.upper()} order: {e}")
-                        # Stop the WebSocket if you want
+                        # Stop websocket
                         twm.stop()
 
-            active_order_ids = {
-                "tp": take_profit['orderId'],
-                "sl": stop_loss['orderId']
-            }
+                        # Signal that trade is done (must schedule coroutine thread safe)
+                        asyncio.get_event_loop().call_soon_threadsafe(self.trade_done_event.set)
 
-            print(active_order_ids)
-
-            twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret)
-            twm.start()
             twm.start_futures_user_socket(callback=handle_socket_msg)
+
+            # Wait until trade_done_event is set from websocket callback
+            await self.trade_done_event.wait()
+            self.trade_done_event.clear()
+
         except Exception as e:
             print(e)
             return
