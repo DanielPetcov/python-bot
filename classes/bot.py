@@ -1,17 +1,10 @@
-import pandas as pd
-
 from telethon import TelegramClient, events
 from binance import Client as BinanceClient
 from binance import ThreadedWebsocketManager
-from binance.helpers import round_step_size
 from models.models import BotInitializer
 from decimal import Decimal, ROUND_DOWN
 
 import requests
-
-import math
-import json
-import threading
 
 import nest_asyncio
 nest_asyncio.apply()
