@@ -3,8 +3,18 @@ import pandas as pd
 from telethon import TelegramClient, events
 from binance import Client as BinanceClient
 from binance import ThreadedWebsocketManager
+from binance.helpers import round_step_size
 from models.models import BotInitializer
 from decimal import Decimal, ROUND_DOWN
+
+import requests
+
+import math
+import json
+import threading
+
+import nest_asyncio
+nest_asyncio.apply()
 
 from helpfullFunctions.functions import getBotTag
 
@@ -77,68 +87,77 @@ class Bot:
         await self.client.run_until_disconnected()
 
     # BINANCE STUFF ------------------------------------------------------------------------------------------
+    
     def round_step(self, value, step):
         return float(Decimal(str(value)).quantize(Decimal(str(step)), rounding=ROUND_DOWN))
 
-    async def trade_on_binance(self, coin: str = "BTC"):
-        symbol = f"{coin.upper()}USDT"
+    async def trade_on_binance(self, coin):
+        my_symbol = f"{coin.upper()}USDT"
+        invest_percent = 10
+        leverage = 20
+
+        # -----------
         client = BinanceClient(self.binance_api_key, self.binance_api_secret, testnet=True)
+        client.futures_change_leverage(symbol=my_symbol, leverage=leverage)
 
-        balance = client.futures_account_balance()
-        usdt_balance = next((item['balance'] for item in balance if item['asset'] == 'USDT'), None)
+        symbol_price = client.get_symbol_ticker(symbol=my_symbol)['price']
 
-        current_symbol_price = client.get_symbol_ticker(symbol=symbol)['price']
-        current_symbol_precision = client.get_symbol_info(symbol=symbol)['baseAssetPrecision']
-    
-        ammount_to_invest = float(usdt_balance) * 0.1
+        url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+        response = requests.get(url)
+        if response.status_code == 200:
+            exchange_info = response.json()
+        else:
+            print(f"Request failed with status code {response.status_code}")
+            return
 
-        leverage = 10
-        take_profit_pct = 100  # +100% move
-        stop_loss_pct = 50     # -50% move
+        quantityPrecision = 0
+        tick_precision = 0
+        for symbol in exchange_info['symbols']:
+            if symbol['symbol'] == my_symbol:
+                quantityPrecision = symbol['quantityPrecision']
+                tick_precision = symbol['filters'][0]['tickSize']
+        
+        assets = client.futures_account_balance()
+        balance = 0
+        for asset in assets:
+            if(asset['asset'] == 'USDT'):
+                balance = asset['balance']
 
-        # Current price
-        entry_price = current_symbol_price
+        if balance == 0:
+            print('the balance is 0')
+            return
 
-        tp = float(entry_price) * (1 + take_profit_pct / 100)
-        sl = float(entry_price) * (1 - stop_loss_pct / 100)
+        the_ammount_to_invest = (invest_percent * float(balance)) / 100
+        quantity = the_ammount_to_invest / float(symbol_price)
+        rounded_quantity = round(quantity, quantityPrecision)
 
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        print('ammount to invest: ',the_ammount_to_invest)
+        print('initial quantity: ', quantity)
+        print('rounded quantity: ', rounded_quantity)
 
-        symbol_info = client.get_symbol_info(symbol=symbol)
-        filters = {f['filterType']: f for f in symbol_info['filters']}
-        step_size = float(filters['LOT_SIZE']['stepSize'])        # for quantity
-        tick_size = float(filters['PRICE_FILTER']['tickSize'])    # for price
+        tp_pct = 100
+        sl_pct = 50
 
-        buy_quantity = round(ammount_to_invest / float(entry_price), current_symbol_precision)
-        print(buy_quantity)
+        position_size = the_ammount_to_invest * leverage
+        delta_tp = (the_ammount_to_invest * tp_pct / 100) / (position_size / float(symbol_price))
+        delta_sl = (the_ammount_to_invest * sl_pct / 100) / (position_size / float(symbol_price))
 
-        print(tick_size, step_size)
+        tp_price = float(symbol_price) + delta_tp
+        sl_price = float(symbol_price) - delta_sl
 
-        buy_quantity_rounded = self.round_step(value=buy_quantity, step=step_size)
-        tp_rounded = self.round_step(value=tp, step=tick_size)
-        sl_rounded = self.round_step(value=sl, step=tick_size)
+        tp_price = self.round_step(tp_price, tick_precision)
+        sl_price = self.round_step(sl_price, tick_precision)
 
-        print(tp_rounded, sl_rounded)
+        print('current price: ', float(symbol_price))
+        print("stop loss price: ", sl_price)
+        print('take profit price: ', tp_price)
 
-        # order = client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=buy_quantity_rounded)
-        # stop_order = client.futures_create_order(symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET", quantity=buy_quantity_rounded, stopPrice=tp_rounded)
-        # take_profit_order = client.futures_create_order(symbol=symbol, side="SELL", type="STOP_MARKET", quantity=buy_quantity_rounded, stopPrice=sl_rounded)
-
-        # twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret)
-        # twm.start()
-
-        # print(stop_order)
-        # print(take_profit_order)
-
-        # take_profit_order_id = take_profit_order
-        # stop_loss_order_id = stop_order
-
-        # active_order_ids = {
-        #     "tp": take_profit_order_id,
-        #     "sl": stop_loss_order_id
-        # }
+        order = client.futures_create_order(symbol=my_symbol, side='BUY', type='MARKET', quantity=str(rounded_quantity))
+        take_profit = client.futures_create_order(symbol=my_symbol, side="SELL", type="TAKE_PROFIT_MARKET", quantity=str(rounded_quantity), stopPrice=str(tp_price))
+        stop_loss = client.futures_create_order(symbol=my_symbol, side="SELL", type="STOP_MARKET", quantity=str(rounded_quantity), stopPrice=str(sl_price))
 
         def handle_socket_msg(msg):
+            print(msg)
             if msg['e'] == 'ORDER_TRADE_UPDATE':
                 order = msg['o']
                 order_id = order['i']
@@ -159,5 +178,14 @@ class Bot:
                     # Stop the WebSocket if you want
                     twm.stop()
 
+        active_order_ids = {
+            "tp": take_profit['orderId'],
+            "sl": stop_loss['orderId']
+        }
 
-        # twm.start_futures_user_socket(callback=handle_socket_msg)
+        print(active_order_ids)
+
+        twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret, testnet=True)
+        twm.start()
+        twm.start_futures_user_socket(callback=handle_socket_msg)
+
