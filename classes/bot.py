@@ -90,7 +90,7 @@ class Bot:
         leverage = 20
 
         # -----------
-        client = BinanceClient(self.binance_api_key, self.binance_api_secret, testnet=True)
+        client = BinanceClient(self.binance_api_key, self.binance_api_secret)
         client.futures_change_leverage(symbol=my_symbol, leverage=leverage)
 
         symbol_price = client.get_symbol_ticker(symbol=my_symbol)['price']
@@ -176,9 +176,7 @@ class Bot:
             "sl": stop_loss['orderId']
         }
 
-        print(active_order_ids)
-
-        twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret, testnet=True)
+        twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret)
         twm.start()
         twm.start_futures_user_socket(callback=handle_socket_msg)
 
