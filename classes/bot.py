@@ -86,14 +86,18 @@ class Bot:
 
     async def trade_on_binance(self, coin):
         my_symbol = f"{coin.upper()}USDT"
-        invest_percent = 10
+        print('my symbol: ', my_symbol)
+        invest_percent = 60
         leverage = 20
 
         # -----------
-        client = BinanceClient(self.binance_api_key, self.binance_api_secret, testnet=True)
-        client.futures_change_leverage(symbol=my_symbol, leverage=leverage)
-
-        symbol_price = client.get_symbol_ticker(symbol=my_symbol)['price']
+        client = BinanceClient(self.binance_api_key, self.binance_api_secret)
+        try:
+            client.futures_change_leverage(symbol=my_symbol, leverage=leverage)
+            symbol_price = client.get_symbol_ticker(symbol=my_symbol)['price']
+        except Exception as e:
+            print(e)
+            return
 
         url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
         response = requests.get(url)
@@ -110,6 +114,8 @@ class Bot:
                 quantityPrecision = symbol['quantityPrecision']
                 tick_precision = symbol['filters'][0]['tickSize']
         
+        print('quantity precision: ', quantityPrecision)
+        
         assets = client.futures_account_balance()
         balance = 0
         for asset in assets:
@@ -122,6 +128,7 @@ class Bot:
 
         the_ammount_to_invest = (invest_percent * float(balance)) / 100
         quantity = the_ammount_to_invest / float(symbol_price)
+        print('quantity before round: ', quantity)
         rounded_quantity = round(quantity, quantityPrecision)
 
         print('ammount to invest: ',the_ammount_to_invest)
@@ -145,40 +152,44 @@ class Bot:
         print("stop loss price: ", sl_price)
         print('take profit price: ', tp_price)
 
-        order = client.futures_create_order(symbol=my_symbol, side='BUY', type='MARKET', quantity=str(rounded_quantity))
-        take_profit = client.futures_create_order(symbol=my_symbol, side="SELL", type="TAKE_PROFIT_MARKET", quantity=str(rounded_quantity), stopPrice=str(tp_price))
-        stop_loss = client.futures_create_order(symbol=my_symbol, side="SELL", type="STOP_MARKET", quantity=str(rounded_quantity), stopPrice=str(sl_price))
+        try:
+            order = client.futures_create_order(symbol=my_symbol, side='BUY', type='MARKET', quantity=str(rounded_quantity))
+            take_profit = client.futures_create_order(symbol=my_symbol, side="SELL", type="TAKE_PROFIT_MARKET", quantity=str(rounded_quantity), stopPrice=str(tp_price))
+            stop_loss = client.futures_create_order(symbol=my_symbol, side="SELL", type="STOP_MARKET", quantity=str(rounded_quantity), stopPrice=str(sl_price))
 
-        def handle_socket_msg(msg):
-            print(msg)
-            if msg['e'] == 'ORDER_TRADE_UPDATE':
-                order = msg['o']
-                order_id = order['i']
-                status = order['X']  # e.g., 'FILLED', 'CANCELED'
-                if order_id in active_order_ids.values() and status == 'FILLED':
-                    print(f"Order filled: {order_id}")
-                    # Cancel the other one
-                    for label, oid in active_order_ids.items():
-                        if oid != order_id:
-                            try:
-                                client.futures_cancel_order(
-                                    symbol='BTCUSDT',
-                                    orderId=oid
-                                )
-                                print(f"Canceled {label.upper()} order {oid}")
-                            except Exception as e:
-                                print(f"Could not cancel {label.upper()} order: {e}")
-                    # Stop the WebSocket if you want
-                    twm.stop()
+            def handle_socket_msg(msg):
+                print(msg)
+                if msg['e'] == 'ORDER_TRADE_UPDATE':
+                    order = msg['o']
+                    order_id = order['i']
+                    status = order['X']  # e.g., 'FILLED', 'CANCELED'
+                    if order_id in active_order_ids.values() and status == 'FILLED':
+                        print(f"Order filled: {order_id}")
+                        # Cancel the other one
+                        for label, oid in active_order_ids.items():
+                            if oid != order_id:
+                                try:
+                                    client.futures_cancel_order(
+                                        symbol='BTCUSDT',
+                                        orderId=oid
+                                    )
+                                    print(f"Canceled {label.upper()} order {oid}")
+                                except Exception as e:
+                                    print(f"Could not cancel {label.upper()} order: {e}")
+                        # Stop the WebSocket if you want
+                        twm.stop()
 
-        active_order_ids = {
-            "tp": take_profit['orderId'],
-            "sl": stop_loss['orderId']
-        }
+            active_order_ids = {
+                "tp": take_profit['orderId'],
+                "sl": stop_loss['orderId']
+            }
 
-        print(active_order_ids)
+            print(active_order_ids)
 
-        twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret, testnet=True)
-        twm.start()
-        twm.start_futures_user_socket(callback=handle_socket_msg)
+            twm = ThreadedWebsocketManager(api_key=self.binance_api_key, api_secret=self.binance_api_secret)
+            twm.start()
+            twm.start_futures_user_socket(callback=handle_socket_msg)
+        except Exception as e:
+            print(e)
+            return
 
