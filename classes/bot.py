@@ -147,7 +147,7 @@ class Bot:
         print('rounded quantity: ', rounded_quantity)
 
         tp_pct = 100
-        sl_pct = 50
+        sl_pct = 70
 
         position_size = the_ammount_to_invest * leverage
         delta_tp = (the_ammount_to_invest * tp_pct / 100) / (position_size / float(symbol_price))
