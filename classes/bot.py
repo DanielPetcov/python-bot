@@ -7,6 +7,8 @@ from decimal import Decimal, ROUND_DOWN
 import requests
 import asyncio
 
+import aiohttp
+
 import nest_asyncio
 nest_asyncio.apply()
 
@@ -61,7 +63,25 @@ class Bot:
             print('You have no chat id present;')
             return
 
-        while True:  # keep listening & restarting after trades finish
+        async def fetch_exchange_info_periodically():
+            while True:
+                try:
+                    print("Fetching latest exchangeInfo from Binance...")
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get('https://fapi.binance.com/fapi/v1/exchangeInfo') as response:
+                            if response.status == 200:
+                                self.exchange_info = await response.json()
+                                print("exchangeInfo updated.")
+                            else:
+                                print(f"Failed to fetch exchangeInfo: HTTP {response.status}")
+                except Exception as e:
+                    print(f"Error fetching exchangeInfo: {e}")
+                await asyncio.sleep(3600)  # 1 hour = 3600 seconds
+
+        # Start periodic fetcher
+        asyncio.create_task(fetch_exchange_info_periodically())
+
+        while True:  # main loop
             if not self.client.is_connected():
                 await self.client.start()
 
@@ -78,12 +98,11 @@ class Bot:
             task = asyncio.create_task(self.client.run_until_disconnected())
 
             print("Waiting for trade to complete...")
-            await self.trade_done_event.wait()  # Wait until trade signals done
+            await self.trade_done_event.wait()
             self.trade_done_event.clear()
 
             print("Trade completed, restarting listener...")
 
-            # Disconnect and cancel Telegram client before restarting
             await self.client.disconnect()
             task.cancel()
             try:
@@ -110,17 +129,18 @@ class Bot:
             print(e)
             return
 
-        url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
-        response = requests.get(url)
-        if response.status_code == 200:
-            exchange_info = response.json()
-        else:
-            print(f"Request failed with status code {response.status_code}")
-            return
+        if self.exchange_info == None:
+            url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+            response = requests.get(url)
+            if response.status_code == 200:
+                self.exchange_info = response.json()
+            else:
+                print(f"Request failed with status code {response.status_code}")
+                return
 
         quantityPrecision = 0
         tick_precision = 0
-        for symbol in exchange_info['symbols']:
+        for symbol in self.exchange_info['symbols']:
             if symbol['symbol'] == my_symbol:
                 quantityPrecision = symbol['quantityPrecision']
                 tick_precision = symbol['filters'][0]['tickSize']
